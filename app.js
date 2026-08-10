@@ -395,36 +395,112 @@ function pickRide(i){
 /* ============================================================
    MARKS → PROPOSED SEGMENTS
    ============================================================ */
+/* Dates arrive in whatever the phone's locale produces.
+   German "10.08.2026, 21:03" must not go through Date.parse, which reads it as 8 October. */
+function parseAnyDate(s){
+  s = String(s).trim();
+  let m;
+  if(m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/))
+    return new Date(+m[3], +m[2]-1, +m[1], +(m[4]||0), +(m[5]||0), +(m[6]||0)).getTime();
+  if(m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?$/))   // no timezone: local
+    return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +(m[6]||0)).getTime();
+  const d = Date.parse(s);
+  return isFinite(d) ? d : null;
+}
+/* "49.5902/11.2185", "49.5902, 11.2185", "49.5902 11.2185" — all fine */
+function parseCoords(s){
+  const nums = String(s).match(/-?\d+(?:\.\d+)?/g);
+  if(!nums || nums.length < 2) return null;
+  const a = parseFloat(nums[0]), b = parseFloat(nums[1]);
+  if(!isFinite(a) || !isFinite(b) || Math.abs(a) > 90 || Math.abs(b) > 180) return null;
+  return [a, b];
+}
+
+const L_DATE = /^(date|datum|zeit|time|when|timestamp)\s*[:=]\s*(.+)$/i;
+const L_DESC = /^(desc|description|beschreibung|note|notiz|kommentar|comment|text)\s*[:=]\s*(.*)$/i;
+const L_POS  = /^(pos|position|location|standort|ort|gps|coord|coords|coordinates|koordinaten)\s*[:=]\s*(.+)$/i;
+
+/* Accepts two shapes:
+   · labelled blocks, as the Shortcuts "Position loggen" style produces —
+       Date: 10.08.2026, 21:03
+       Description: Ortsausfahrt Eckental
+       Position: 49.5889/11.2156
+   · one line per mark —  2026-08-10T21:03:00+02:00,49.5889,11.2156,note   */
 function parseMarkers(text){
-  const out=[];
-  for(const raw of text.split(/\r?\n/)){
-    const line=raw.trim();
-    if(!line||line.startsWith('#')) continue;
-    const parts=line.split(/\s*[,;\t|]\s*/);
+  const out = [];
+  let cur = null;
+  const blank = () => ({t:null, lat:null, lon:null, note:''});
+  const flush = () => { if(cur && (cur.t!==null || cur.lat!==null)) out.push(cur); cur = null; };
+
+  for(const raw of String(text).split(/\r?\n/)){
+    const line = raw.trim();
+    if(!line || line.startsWith('#')) continue;
+    let m;
+
+    if(m = line.match(L_DATE)){                 // a Date line always starts a new mark
+      flush(); cur = blank(); cur.t = parseAnyDate(m[2]); continue;
+    }
+    if(m = line.match(L_DESC)){
+      if(!cur) cur = blank();
+      const v = m[2].trim();
+      if(v && !/^position loggen$/i.test(v)) cur.note = v;   // drop the shortcut's own label
+      continue;
+    }
+    if(m = line.match(L_POS)){
+      if(!cur) cur = blank();
+      const c = parseCoords(m[2]);
+      if(c){ cur.lat = c[0]; cur.lon = c[1] }
+      continue;
+    }
+
+    // otherwise: a single-line record
+    const parts = line.split(/\s*[,;\t|]\s*/);
     let t=null, lat=null, lon=null, note=[];
     for(const p of parts){
+      if(t===null){ const d=parseAnyDate(p); if(d!==null){ t=d; continue } }
       const num=Number(p);
-      if(t===null){ const d=Date.parse(p); if(isFinite(d)){ t=d; continue } }
       if(isFinite(num)&&p!==''&&lat===null&&Math.abs(num)<=90&&/\./.test(p)){ lat=num; continue }
       if(isFinite(num)&&p!==''&&lat!==null&&lon===null&&Math.abs(num)<=180&&/\./.test(p)){ lon=num; continue }
       note.push(p);
     }
-    if(t===null&&lat===null) continue;
-    out.push({t,lat,lon,note:note.join(', ')});
+    if(t===null && lat===null) continue;
+    flush();
+    out.push({t, lat, lon, note:note.join(', ')});
   }
+  flush();
   return out;
 }
+/* Coordinates beat timestamps: a logged position is exact, while a "21:03"
+   timestamp is only minute-resolution. When both exist, match by position but
+   restrict the search to a time window, which disambiguates a road ridden twice. */
 function nearestIndex(m){
   if(!ride) return -1;
-  if(m.t!==null && ride.hasTime){
-    let best=-1,bd=Infinity;
+  const hasPos = m.lat!==null && m.lon!==null;
+  const hasT   = m.t!==null && ride.hasTime;
+
+  if(hasPos){
+    const near = (windowMs) => {
+      let best=-1, bd=Infinity;
+      for(let i=0;i<ride.pts.length;i++){
+        const p=ride.pts[i];
+        if(windowMs!==null && p.t!==null && Math.abs(p.t-m.t) > windowMs) continue;
+        const d=hav(p,m);
+        if(d<bd){ bd=d; best=i }
+      }
+      return {best, bd};
+    };
+    if(hasT){
+      let r = near(15*60*1000);                     // within a quarter hour
+      if(r.best>=0 && r.bd<0.5) return r.best;
+    }
+    const r = near(null);
+    if(r.best>=0 && r.bd<0.5) return r.best;
+    if(r.best>=0 && r.bd<2){ toast(`A mark sat ${fmt(r.bd)} km off the track — snapped it anyway.`, 4000); return r.best }
+  }
+  if(hasT){
+    let best=-1, bd=Infinity;
     ride.pts.forEach((p,i)=>{ if(p.t===null)return; const d=Math.abs(p.t-m.t); if(d<bd){bd=d;best=i} });
     if(best>=0 && bd<45*60*1000) return best;
-  }
-  if(m.lat!==null&&m.lon!==null){
-    let best=-1,bd=Infinity;
-    ride.pts.forEach((p,i)=>{ const d=hav(p,m); if(d<bd){bd=d;best=i} });
-    if(best>=0 && bd<0.5) return best;
   }
   return -1;
 }

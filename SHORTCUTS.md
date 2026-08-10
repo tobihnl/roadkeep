@@ -26,6 +26,20 @@ The one that has to work every time. No dictation, no thinking.
 
 Settings (ⓘ): name it exactly **Mark road**, **Allow Running When Locked** on, **Ask Before Running** off.
 
+### The format doesn't have to match exactly
+
+Roadkeep also reads labelled blocks, which is what several ready-made "log position" shortcuts produce:
+
+```
+Date: 10.08.2026, 21:03
+Description: Ortsausfahrt Eckental
+Position: 49.58892229289478/11.21561751719265
+```
+
+German `DD.MM.YYYY` dates, `/` or `,` or a space between the coordinates, and English or German labels (`Datum`, `Beschreibung`, `Standort`, `Koordinaten`) all work. A new `Date:` line starts a new mark. If your existing shortcut already writes something like this, keep it.
+
+Coordinates matter more than the timestamp: `21:03` is only minute-accurate, while a logged position is exact. When both are present, Roadkeep matches on position and uses the time only to disambiguate a road you rode twice in one day.
+
 Test it in the kitchen: "Hey Siri, mark road" should answer "marked" within about two seconds.
 
 **Why a Note and not Notion or a direct upload:** Notes appends offline and syncs later. Anything that needs a connection at the moment you press it will fail silently exactly where the good roads are.
