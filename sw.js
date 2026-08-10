@@ -1,9 +1,10 @@
 /* Roadkeep service worker.
    Two caches: the app shell (small, versioned) and map tiles (big, capped).
    Bump SHELL_V whenever index.html / app.js change. */
-const SHELL_V = 'rk-shell-2';
-const TILE_V  = 'rk-tiles-1';
+const SHELL_V = 'rk-shell-3';
+const TILE_V  = 'rk-tiles-2';
 const TILE_MAX = 900;
+const TILE_TTL = 7 * 24 * 60 * 60 * 1000;   // OSM policy minimum before revalidating
 
 const SHELL = [
   './', './index.html', './app.js', './manifest.webmanifest',
@@ -42,18 +43,40 @@ self.addEventListener('fetch', e=>{
   if(req.method !== 'GET') return;
   const url = new URL(req.url);
 
-  // map tiles: cache first, top up in the background, capped
+  /* Map tiles. The OSM Tile Usage Policy permits re-serving tiles the user has
+     actually viewed, from a local cache honouring the server's caching headers
+     (or a 7-day minimum). It forbids pre-fetching or "download for offline".
+     So: only cache what was genuinely requested, and revalidate once stale. */
   if(/tile\.openstreetmap\.org/.test(url.hostname)){
     e.respondWith((async()=>{
       const c = await caches.open(TILE_V);
       const hit = await c.match(req);
-      if(hit) return hit;
+
+      if(hit){
+        const dated = hit.headers.get('date');
+        const ageMs = dated ? Date.now() - Date.parse(dated) : Infinity;
+        if(ageMs < TILE_TTL) return hit;
+        // stale: serve it, but refresh in the background with a conditional request
+        e.waitUntil((async()=>{
+          try{
+            const headers = new Headers();
+            const etag = hit.headers.get('etag');
+            const lm = hit.headers.get('last-modified');
+            if(etag) headers.set('If-None-Match', etag);
+            else if(lm) headers.set('If-Modified-Since', lm);
+            const res = await fetch(new Request(req.url, {headers, mode:'cors', credentials:'omit'}));
+            if(res.status === 200){ await c.put(req, res.clone()); trimTiles(); }
+          }catch(err){}
+        })());
+        return hit;
+      }
+
       try{
         const res = await fetch(req);
         if(res.ok){ c.put(req, res.clone()); trimTiles(); }
         return res;
       }catch(err){
-        return new Response('', {status:504});
+        return new Response('', {status:504});   // offline and never seen: blank tile
       }
     })());
     return;
